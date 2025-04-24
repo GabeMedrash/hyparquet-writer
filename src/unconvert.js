@@ -38,6 +38,9 @@ export function unconvert(schemaElement, values) {
     const encoder = new TextEncoder()
     return values.map(v => encoder.encode(v))
   }
+  if (ctype === 'LIST') {
+    return Array.from(values).flat()
+  }
   return values
 }
 

@@ -12,6 +12,8 @@ export interface ParquetWriteOptions {
 export interface ColumnData {
   name: string
   data: DecodedArray
+  schema_path: string[]
+  
   // fields from SchemaElement:
   type?: ParquetType
   type_length?: number

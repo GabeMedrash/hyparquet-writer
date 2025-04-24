@@ -1,4 +1,6 @@
 import { Encoding, PageType } from 'hyparquet/src/constants.js'
+import { getSchemaPath, isFlatColumn } from 'hyparquet/src/schema.js'
+
 import { unconvert } from './unconvert.js'
 import { writeRleBitPackedHybrid } from './encoding.js'
 import { writePlain } from './plain.js'
@@ -6,6 +8,70 @@ import { getMaxDefinitionLevel, getMaxRepetitionLevel } from './schema.js'
 import { snappyCompress } from './snappy.js'
 import { serializeTCompactProtocol } from './thrift.js'
 import { ByteWriter } from './bytewriter.js'
+
+/**
+ * Flattens a nested array structure according to the schema.
+ * @param {Array} data - The nested data
+ * @param {SchemaElement[]} schema - The schema path
+ * @returns {{values: Array, defLevels: Array, repLevels: Array}}
+ */
+function flattenNestedData(data, schema) {
+  const values = []
+  const defLevels = []
+  const repLevels = []
+  const maxDefLevel = getMaxDefinitionLevel(schema)
+  const maxRepLevel = getMaxRepetitionLevel(schema)
+  
+  function traverse(val, defLevel, repLevel, parentRepLevel) {
+    if (val === null || val === undefined) {
+      defLevels.push(defLevel)
+      repLevels.push(repLevel)
+      return
+    }
+    
+    // If this is a leaf node
+    if (!Array.isArray(val)) {
+      values.push(val)
+      defLevels.push(maxDefLevel)
+      repLevels.push(repLevel)
+      return
+    }
+    
+    // This is an array (repeated field)
+    if (val.length === 0) {
+      // Empty array - push a null with the parent's definition level
+      defLevels.push(defLevel)
+      repLevels.push(repLevel)
+      return;
+    }
+    
+    // Process array elements
+    for (let i = 0; i < val.length; i++) {
+      // First element of a new list starts with current repetition level
+      // Subsequent elements get the next repetition level
+      const newRepLevel = (i === 0) ? repLevel : parentRepLevel + 1
+      traverse(val[i], defLevel + 1, newRepLevel, parentRepLevel + 1)
+    }
+  }
+  
+  // Start with top-level array
+  if (Array.isArray(data) && data.length > 0) {
+    for (let i = 0; i < data.length; i++) {
+      // Top-level elements always have rep level 0 to indicate a new record
+      traverse(data[i], 0, 0, 0)
+    }
+  } else if (data === null || data === undefined) {
+    defLevels.push(0)
+    repLevels.push(0)
+  } else {
+    // Single non-array value
+    defLevels.push(maxDefLevel)
+    repLevels.push(0)
+    values.push(data)
+  }
+  
+  return { values, defLevels, repLevels }
+}
 
 /**
  * @import {ColumnMetaData, DecodedArray, PageHeader, ParquetType, SchemaElement, Statistics} from 'hyparquet'
@@ -23,6 +89,7 @@ export function writeColumn(writer, schemaPath, values, compressed, stats) {
   if (!type) throw new Error(`column ${schemaElement.name} cannot determine type`)
   let dataType = type
   const offsetStart = writer.offset
+
   const num_values = values.length
   /** @type {Statistics | undefined} */
   let statistics = undefined
@@ -47,9 +114,17 @@ export function writeColumn(writer, schemaPath, values, compressed, stats) {
     statistics = { min_value, max_value, null_count }
   }
 
+
+  const schemaTree = getSchemaPath(schemaPath, schemaPath.slice(1).map((e) => e.name));
+  let flattenedData = { values, defLevels: [], repLevels: [] };
+  
+  if (!isFlatColumn(schemaTree)) {
+    flattenedData = flattenNestedData(values, schemaPath);
+  }
+
   // Write levels to temp buffer
   const levels = new ByteWriter()
-  const { definition_levels_byte_length, repetition_levels_byte_length, num_nulls } = writeLevels(levels, schemaPath, values)
+  const { definition_levels_byte_length, repetition_levels_byte_length, num_nulls } = writeLevels(levels, schemaPath, flattenedData.values, flattenedData.defLevels, flattenedData.repLevels)
 
   // dictionary encoding
   let dictionary_page_offset = undefined
@@ -74,8 +149,7 @@ export function writeColumn(writer, schemaPath, values, compressed, stats) {
     writeDictionaryPage(writer, dictionary, type, compressed)
   } else {
     // unconvert type and filter out nulls
-    values = unconvert(schemaElement, values)
-      .filter(v => v !== null && v !== undefined)
+    values = unconvert(schemaElement, flattenedData.values).filter(v => v !== null && v !== undefined)
   }
 
   // write page data to temp buffer

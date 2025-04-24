@@ -1,3 +1,5 @@
+import { getSchemaPath } from "hyparquet/src/schema.js"
+
 import { writeColumn } from './column.js'
 import { writeMetadata } from './metadata.js'
 
@@ -48,8 +50,12 @@ ParquetWriter.prototype.write = function({ columnData, rowGroupSize = 100000 }) 
 
     // write columns
     for (let j = 0; j < columnData.length; j++) {
-      const { name, data } = columnData[j]
-      const schemaPath = [this.schema[0], this.schema[j + 1]]
+      const { 
+        name, 
+        data, 
+        schema_path,
+      } = columnData[j]
+      const schemaPath = getSchemaPath(this.schema, schema_path).map((node) => node.element)
       const groupData = data.slice(groupStartIndex, groupStartIndex + groupSize)
       const file_offset = BigInt(this.writer.offset)
       const meta_data = writeColumn(this.writer, schemaPath, groupData, this.compressed, this.statistics)
